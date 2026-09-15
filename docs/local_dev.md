@@ -50,6 +50,15 @@ docker compose exec node npm run test
 **A front change is only visible on 8084 after a rebuild.** The dev server on 9201 is the one
 that reloads by itself.
 
+## Signing in
+
+`make setup` leaves the Firebase settings empty, and until they are filled the PWA is a blank
+page — it has no session to read back and nothing to show somebody who cannot sign in, so the
+console carries `Firebase is not configured` and nothing renders. Six values go in
+`front/.env.local` and one service account file goes in `back/storage/app/`, both from the
+Firebase console — **[docs/firebase.md](firebase.md)** is the walkthrough. The front's values are
+read at build time, so `npm run build` (or a restart of `npm run dev`) after editing them.
+
 ## Tests
 
 `make test` runs the backend suite against **Postgres**, in the `dates_testing` database — not

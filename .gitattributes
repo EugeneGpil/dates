@@ -24,6 +24,7 @@
 /.github              export-ignore
 /.claude              export-ignore
 /.idea                export-ignore
+/.vscode              export-ignore
 /deploy.php           export-ignore
 /setup.sh             export-ignore
 /.env.example         export-ignore

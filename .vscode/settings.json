@@ -1,0 +1,13 @@
+{
+    // This project is not the PHP 8.1 one the global settings.json targets: docker/php/Dockerfile
+    // is php:8.4-fpm and composer.json requires ^8.3. Without this override Intelephense reports
+    // `readonly class` (8.2+) and every other modern construct as a syntax error.
+    "intelephense.environment.phpVersion": "8.4",
+
+    // Vetur is the Vue 2 language server, kept installed for other workspaces. This project is
+    // Vue 3 + Quasar and is served by vue.volar, so Vetur must not touch it — disable it for this
+    // workspace (Extensions → Vetur → Disable (Workspace)). Until then this silences the warnings
+    // it raises about the root having no package.json / tsconfig.json: there is none by design,
+    // the front end lives in front/ with its own package.json and jsconfig.json.
+    "vetur.ignoreProjectWarning": true
+}

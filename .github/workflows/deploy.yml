@@ -131,11 +131,24 @@ jobs:
       # VITE_API_URL is intentionally empty: the API is same-origin in
       # production (host nginx routes /api to Laravel), so src/api.js requests
       # a relative /api/... path.
+      #
+      # The Firebase values are secrets only in the sense that they live in the
+      # repository's settings rather than in the repository. A web app config
+      # identifies the project to Google and ships readable inside every client;
+      # what protects the data is the id token exchange on the server
+      # (docs/firebase.md). They are here because a build with them empty
+      # produces a PWA whose sign-in button silently does nothing.
       - name: Write frontend env
         working-directory: front
         run: |
           cat > .env <<'EOF'
           VITE_API_URL=
+          VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}
           EOF
 
       # NPM_CONFIG_PREFIX is overridden because the image points it at /home/app, which the

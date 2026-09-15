@@ -67,6 +67,14 @@ if [ ! -f front/.env.local ]; then
     echo -e "${GREEN}Created front/.env.local from front/.env.example${NC}"
 fi
 
+# The API's own origin, because locally it does not share one with the front: the PWA is served
+# from :8084 (nginx) or :9201 (the dev server) and Laravel answers on :8001. In production the
+# two are same-origin — host nginx routes /api to Laravel — which is why .env.example leaves
+# this empty and only the local file is given a value.
+#
+# The Firebase settings next to it stay empty and have to be filled by hand; docs/firebase.md.
+sed -i "s|^VITE_API_URL=.*|VITE_API_URL=http://localhost:${NGINX_PORT:-8001}|" front/.env.local
+
 configure_env() {
     local file="back/.env"
     sed -i "s|^APP_URL=.*|APP_URL=http://localhost:${NGINX_PORT:-8001}|" "$file"
@@ -86,6 +94,12 @@ configure_env() {
     # the scheduler tick.
     sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" "$file"
     sed -i "s|^SESSION_DRIVER=.*|SESSION_DRIVER=database|" "$file"
+
+    # Appended rather than replaced, because a checkout made before this key existed has a
+    # back/.env without it — and the file is gitignored, so nothing else would ever add it.
+    # The JSON it points at is not in the repo either: docs/firebase.md says where to get it.
+    grep -q '^FIREBASE_CREDENTIALS=' "$file" \
+        || printf '\nFIREBASE_CREDENTIALS=storage/app/firebase-credentials.json\n' >> "$file"
 }
 
 configure_env

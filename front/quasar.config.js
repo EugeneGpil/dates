@@ -8,7 +8,9 @@ export default defineConfig((ctx) => {
   return {
     // app boot file (/src/boot)
     // https://v2.quasar.dev/quasar-cli-vite/boot-files
-    boot: ['i18n'],
+    // `firebase` last: it awaits the stored session before the app mounts, so the router guard
+    // and the account menu both get a settled answer rather than "not yet".
+    boot: ['i18n', 'firebase'],
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#css
     css: ['app.scss'],

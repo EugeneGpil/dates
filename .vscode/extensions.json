@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "vue.volar",
+        "bmewburn.vscode-intelephense-client"
+    ],
+    // Vue 2 only. On this Vue 3 codebase it duplicates and contradicts Volar.
+    "unwantedRecommendations": [
+        "octref.vetur"
+    ]
+}
