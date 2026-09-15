@@ -59,8 +59,8 @@ a green suite there would say nothing about production. `RefreshDatabase` trunca
 pointed at, hence the separate database; `setup.sh` creates it, and a suite run without it fails
 with `database "dates_testing" does not exist`.
 
-Note that **CI does not run tests today** — `.github/workflows/deploy.yml` builds and deploys
-only. Run them locally before pushing.
+CI runs the same four checks — `artisan test`, `pint --test`, `npm run lint`, `vitest` — in the
+same containers, before it builds the artifact. A red suite stops the deploy.
 
 ## Services
 

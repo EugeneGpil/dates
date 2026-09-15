@@ -24,6 +24,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # --- environment ---------------------------------------------------
+
+      # **Before the first `docker compose run`, and that ordering is the whole point.**
+      # docker-compose.yml bind-mounts `back/.env` as a single file, and the daemon creates a
+      # missing bind source as a *directory* — after which Laravel's .env is a directory and
+      # every artisan command fails somewhere that does not mention it. Both files are
+      # gitignored, so a fresh checkout never has them.
+      - name: Write the env files
+        run: |
+          cp .env.example .env
+          cp back/.env.example back/.env
+          sed -i 's|^APP_ENV=.*|APP_ENV=testing|' back/.env
+          sed -i 's|^DB_CONNECTION=.*|DB_CONNECTION=pgsql|' back/.env
+          sed -i 's|^# DB_HOST=.*|DB_HOST=postgres|' back/.env
+          sed -i 's|^# DB_PORT=.*|DB_PORT=5432|' back/.env
+          sed -i 's|^# DB_DATABASE=.*|DB_DATABASE=dates|' back/.env
+          sed -i 's|^# DB_USERNAME=.*|DB_USERNAME=dates|' back/.env
+          sed -i 's|^# DB_PASSWORD=.*|DB_PASSWORD=secret|' back/.env
+
       # --- toolchain images ----------------------------------------------
 
       - uses: docker/setup-buildx-action@v4
@@ -58,16 +77,48 @@ jobs:
           cache-from: type=gha,scope=node
           cache-to: type=gha,mode=max,scope=node
 
-      # --- backend -------------------------------------------------------
+      # --- backend: install, then prove it ---------------------------------
 
-      - name: Install PHP dependencies
+      # With dev dependencies, because PHPUnit and Pint are among them. The artifact is built
+      # from a second, `--no-dev` install further down — running the suite against the vendor
+      # tree that ships would mean shipping PHPUnit to the server.
+      - name: Install PHP dependencies (with dev)
         run: |
           docker compose run --rm --no-deps \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -e COMPOSER_HOME=/tmp/.composer \
-            php composer install --no-dev --prefer-dist --no-interaction \
-              --no-progress --optimize-autoloader
+            php composer install --prefer-dist --no-interaction --no-progress
+
+      # The suite runs on Postgres, not on an in-memory sqlite (back/phpunit.xml says why), so
+      # CI needs the same container local dev uses rather than a `services:` block — a service
+      # container sits on the runner's network and `docker compose run` would not resolve it.
+      - name: Start Postgres
+        run: |
+          docker compose up -d postgres
+          for i in $(seq 30); do
+            docker compose exec -T postgres pg_isready -U dates > /dev/null 2>&1 && break
+            sleep 2
+          done
+          docker compose exec -T postgres createdb -U dates dates_testing
+
+      - name: Generate the application key
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            php php artisan key:generate --no-interaction
+
+      - name: Backend tests
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            php php artisan test
+
+      - name: Backend formatting
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            php vendor/bin/pint --test
 
       # --- frontend ------------------------------------------------------
 
@@ -87,23 +138,57 @@ jobs:
           VITE_API_URL=
           EOF
 
-      # Same node container as local dev, so the exact node version comes from
-      # docker/node/Dockerfile (24.15.0) rather than a floating runner label.
-      # NPM_CONFIG_PREFIX is overridden because the image points it at
-      # /home/app, which the runner's uid cannot write to.
-      - name: Install JS dependencies and build the PWA
+      # NPM_CONFIG_PREFIX is overridden because the image points it at /home/app, which the
+      # runner's uid cannot write to.
+      #
+      # Same node container as local dev for all three, so the exact node version comes from
+      # docker/node/Dockerfile rather than a floating runner label. Lint and vitest run before
+      # the build rather than after, so a broken spec fails in seconds instead of after a full
+      # bundle.
+      - name: Install JS dependencies
         run: |
           docker compose run --rm --no-deps \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -e NPM_CONFIG_PREFIX=/tmp/.npm-global \
             -e npm_config_cache=/tmp/.npm-cache \
-            node sh -c 'npm ci && npm run build'
+            node npm ci
+
+      - name: Frontend lint and tests
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e NPM_CONFIG_PREFIX=/tmp/.npm-global \
+            -e npm_config_cache=/tmp/.npm-cache \
+            node sh -c 'npm run lint && npm run test'
+
+      - name: Build the PWA
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e NPM_CONFIG_PREFIX=/tmp/.npm-global \
+            -e npm_config_cache=/tmp/.npm-cache \
+            node npm run build
 
       - name: Fail if the service worker is missing
         run: test -f front/dist/pwa/sw.js && test -f front/dist/pwa/manifest.json
 
       # --- artifact ------------------------------------------------------
+
+      # Everything above has been proven; this is what actually ships. Re-resolving without dev
+      # drops PHPUnit, Pint and their trees from `back/vendor`, which the next step copies into
+      # the release as-is. `--optimize-autoloader` belongs here and not on the install above,
+      # where it would only have slowed the test run down.
+      - name: Reinstall PHP dependencies without dev
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e COMPOSER_HOME=/tmp/.composer \
+            php composer install --no-dev --prefer-dist --no-interaction \
+              --no-progress --optimize-autoloader
 
       - name: Assemble release artifact
         run: |
