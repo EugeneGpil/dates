@@ -25,7 +25,13 @@ services:
       - "${NGINX_FRONT_PORT:-8084}:81"
     volumes:
       - ./back:/var/www/html:ro
-      - ./front/dist/pwa:/var/www/front:ro
+      # The whole `front/`, not `front/dist/pwa` directly, and the root in front.conf points
+      # the rest of the way. `quasar build` deletes and recreates its output directory, so a
+      # mount of `dist/pwa` keeps resolving to the inode that build just unlinked: the
+      # container sees an empty directory and every request answers 403 until nginx is
+      # recreated. `front/` itself is never replaced, so the mount stays valid across rebuilds
+      # and the normal loop — rebuild, refresh the tab — works.
+      - ./front:/var/www/front:ro
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./docker/nginx/front.conf:/etc/nginx/conf.d/front.conf:ro
     depends_on:
@@ -46,6 +52,14 @@ services:
   # The notification sends themselves. `dates:notify` only queues a job per user, so one
   # unreachable FCM call cannot stall everyone behind it — and the scheduler tick stays
   # short whatever FCM is doing. QUEUE_CONNECTION=database, so this needs no broker.
+  #
+  # `--max-time=3600` is not a timeout on a job: it tells the worker to stop accepting new work
+  # after an hour and exit, at which point `restart: unless-stopped` starts a fresh one. A
+  # long-lived PHP worker holds whatever its jobs leaked for as long as it lives, and it also
+  # keeps running the code it booted with — so without this, a deploy would leave the old
+  # release's worker processing jobs against the new release's database. The hourly exit is the
+  # cheap version of both fixes. `--tries=3` because an FCM call can fail for a minute and
+  # succeed on the retry, and a reminder is worth three attempts.
   queue:
     <<: *php
     command: php artisan queue:work --tries=3 --max-time=3600

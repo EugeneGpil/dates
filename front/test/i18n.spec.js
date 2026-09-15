@@ -84,3 +84,57 @@ describe('Russian plurals', () => {
     expect(i18n.global.t('test.days', n, { n })).toBe(expected)
   })
 })
+
+describe('setLocale', () => {
+  beforeEach(() => {
+    stubNavigator(['en-US'])
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('switches the catalogue, remembers the choice and marks the document', async () => {
+    const stored = {}
+    vi.stubGlobal('localStorage', {
+      getItem: (k) => stored[k] ?? null,
+      setItem: (k, v) => {
+        stored[k] = v
+      },
+    })
+    vi.stubGlobal('document', { documentElement: {} })
+
+    const { i18n, setLocale } = await loadI18n()
+    await setLocale('ru-RU')
+
+    expect(i18n.global.locale.value).toBe('ru-RU')
+    expect(stored['dates.locale']).toBe('ru-RU')
+    expect(globalThis.document.documentElement.lang).toBe('ru-RU')
+  })
+
+  it('ignores a locale the app does not ship, rather than blanking the UI', async () => {
+    const { i18n, setLocale } = await loadI18n()
+    await setLocale('th-TH')
+
+    expect(i18n.global.locale.value).toBe('en-US')
+  })
+
+  /**
+   * The language has already switched by the time storage is written, so a browser with storage
+   * switched off must lose the choice for next launch and nothing else. A throw here would take
+   * the switcher down with it.
+   */
+  it('still switches when storage refuses the write', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('storage disabled')
+      },
+    })
+
+    const { i18n, setLocale } = await loadI18n()
+    await setLocale('ru-RU')
+
+    expect(i18n.global.locale.value).toBe('ru-RU')
+  })
+})

@@ -8,8 +8,9 @@ Everything runs in Docker. Nothing — PHP, Node, Postgres — needs to be insta
 make setup
 ```
 
-It copies `.env.example` to `.env`, builds the images, waits for Postgres, writes `back/.env`
-and `front/.env.local`, installs both dependency trees, builds the PWA and runs the migrations.
+It copies `.env.example` to `.env`, builds the images, waits for Postgres, creates the
+`dates_testing` database, writes `back/.env` and `front/.env.local`, installs both dependency
+trees, builds the PWA and runs the migrations.
 
 Then:
 
@@ -48,6 +49,18 @@ docker compose exec node npm run test
 
 **A front change is only visible on 8084 after a rebuild.** The dev server on 9201 is the one
 that reloads by itself.
+
+## Tests
+
+`make test` runs the backend suite against **Postgres**, in the `dates_testing` database — not
+the in-memory sqlite Laravel defaults to. `back/phpunit.xml` carries the reason: this app is
+date arithmetic in a per-user timezone, and sqlite has no date type and no timezone handling, so
+a green suite there would say nothing about production. `RefreshDatabase` truncates what it is
+pointed at, hence the separate database; `setup.sh` creates it, and a suite run without it fails
+with `database "dates_testing" does not exist`.
+
+Note that **CI does not run tests today** — `.github/workflows/deploy.yml` builds and deploys
+only. Run them locally before pushing.
 
 ## Services
 

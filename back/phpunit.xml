@@ -23,8 +23,20 @@
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
-        <env name="DB_CONNECTION" value="sqlite"/>
-        <env name="DB_DATABASE" value=":memory:"/>
+        <!--
+            Postgres, not the in-memory sqlite Laravel ships this file with. The app's whole
+            domain is date arithmetic in a per-user timezone, and sqlite has no date type, no
+            timezone handling and a different idea of what a comparison between two of them
+            means — so a suite that runs on it proves the code works somewhere this app is
+            never deployed. It also makes the health endpoint's success branch testable at all,
+            since that branch exists precisely to assert the driver.
+
+            Its own database rather than the development one: `RefreshDatabase` truncates what
+            it is pointed at. `setup.sh` creates it; `make test` fails with "database
+            dates_testing does not exist" if it was skipped.
+        -->
+        <env name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_DATABASE" value="dates_testing"/>
         <env name="DB_URL" value=""/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>

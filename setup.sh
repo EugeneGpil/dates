@@ -22,6 +22,12 @@ if [ ! -f .env ]; then
     echo -e "${GREEN}Created .env from .env.example${NC}"
 fi
 
+# Compose reads .env by itself; this shell does not, and the psql calls below need the same
+# database name and user that the container was given.
+set -a
+. ./.env
+set +a
+
 # Build images
 echo "Building Docker images..."
 docker compose build
@@ -30,7 +36,7 @@ docker compose build
 docker compose up -d postgres
 echo "Waiting for PostgreSQL to be ready..."
 RETRIES=30
-until docker compose exec -T postgres pg_isready -U dates > /dev/null 2>&1; do
+until docker compose exec -T postgres pg_isready -U "${DB_USERNAME:-dates}" > /dev/null 2>&1; do
     RETRIES=$((RETRIES - 1))
     if [ $RETRIES -le 0 ]; then
         echo "PostgreSQL failed to start. Check logs: docker compose logs postgres"
@@ -39,6 +45,16 @@ until docker compose exec -T postgres pg_isready -U dates > /dev/null 2>&1; do
     sleep 2
 done
 echo -e "${GREEN}PostgreSQL ready.${NC}"
+
+# The suite runs on Postgres rather than an in-memory sqlite (back/phpunit.xml says why), and
+# `RefreshDatabase` truncates whatever it is pointed at — so it gets a database of its own.
+# Created here rather than through /docker-entrypoint-initdb.d, which only runs on the very
+# first init of the data directory and so would miss every existing checkout.
+if ! docker compose exec -T postgres psql -U "${DB_USERNAME:-dates}" -tAc \
+    "SELECT 1 FROM pg_database WHERE datname='${DB_DATABASE:-dates}_testing'" | grep -q 1; then
+    docker compose exec -T postgres createdb -U "${DB_USERNAME:-dates}" "${DB_DATABASE:-dates}_testing"
+    echo -e "${GREEN}Created the test database.${NC}"
+fi
 
 # Configure back/.env
 if [ ! -f back/.env ]; then
@@ -53,18 +69,18 @@ fi
 
 configure_env() {
     local file="back/.env"
-    sed -i "s|^APP_URL=.*|APP_URL=http://localhost:8001|" "$file"
+    sed -i "s|^APP_URL=.*|APP_URL=http://localhost:${NGINX_PORT:-8001}|" "$file"
     sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=pgsql|" "$file"
     sed -i "s|^# DB_HOST=.*|DB_HOST=postgres|" "$file"
     sed -i "s|^DB_HOST=.*|DB_HOST=postgres|" "$file"
     sed -i "s|^# DB_PORT=.*|DB_PORT=5432|" "$file"
     sed -i "s|^DB_PORT=.*|DB_PORT=5432|" "$file"
-    sed -i "s|^# DB_DATABASE=.*|DB_DATABASE=dates|" "$file"
-    sed -i "s|^DB_DATABASE=.*|DB_DATABASE=dates|" "$file"
-    sed -i "s|^# DB_USERNAME=.*|DB_USERNAME=dates|" "$file"
-    sed -i "s|^DB_USERNAME=.*|DB_USERNAME=dates|" "$file"
-    sed -i "s|^# DB_PASSWORD=.*|DB_PASSWORD=secret|" "$file"
-    sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=secret|" "$file"
+    sed -i "s|^# DB_DATABASE=.*|DB_DATABASE=${DB_DATABASE:-dates}|" "$file"
+    sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${DB_DATABASE:-dates}|" "$file"
+    sed -i "s|^# DB_USERNAME=.*|DB_USERNAME=${DB_USERNAME:-dates}|" "$file"
+    sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${DB_USERNAME:-dates}|" "$file"
+    sed -i "s|^# DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD:-secret}|" "$file"
+    sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD:-secret}|" "$file"
     # The notification sends run on the queue (docker-compose.yml, service `queue`), so the
     # default `sync` driver would make them inline again and put FCM's latency back inside
     # the scheduler tick.
@@ -101,7 +117,7 @@ echo -e "${GREEN}=========================="
 echo "  Setup complete!"
 echo -e "==========================${NC}"
 echo ""
-echo "  API:   http://localhost:8001/api/health"
-echo "  PWA:   http://localhost:8084"
-echo "  Dev:   make node, then npm run dev  (http://localhost:9201)"
+echo "  API:   http://localhost:${NGINX_PORT:-8001}/api/health"
+echo "  PWA:   http://localhost:${NGINX_FRONT_PORT:-8084}"
+echo "  Dev:   make node, then npm run dev  (http://localhost:${QUASAR_PORT:-9201})"
 echo ""
