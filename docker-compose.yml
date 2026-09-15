@@ -1,0 +1,120 @@
+# `php`, `scheduler` and `queue` are the same image with the same code, .env and storage
+# mounted — they differ only in what they run. Defined once so the three cannot drift apart.
+x-php: &php
+  image: dates-php
+  build:
+    context: ./docker/php
+    args:
+      USER_ID: ${USER_ID:-1000}
+      GROUP_ID: ${GROUP_ID:-1000}
+  volumes:
+    - ./back:/var/www/html
+    - ${SHARED_PATH:-.}/back/.env:/var/www/html/.env
+    - ${SHARED_PATH:-.}/back/storage:/var/www/html/storage
+    - ${SHARED_PATH:-.}/docker/volumes/php_home:/home/app
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  nginx:
+    image: nginx:1.30.0-trixie
+    ports:
+      - "${NGINX_PORT:-8001}:80"
+      - "${NGINX_FRONT_PORT:-8084}:81"
+    volumes:
+      - ./back:/var/www/html:ro
+      - ./front/dist/pwa:/var/www/front:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx/front.conf:/etc/nginx/conf.d/front.conf:ro
+    depends_on:
+      - php
+    restart: unless-stopped
+
+  php:
+    <<: *php
+
+  # Laravel's scheduler, in-container so no host cron is needed and the environment is
+  # reproducible anywhere `docker compose up` runs. `schedule:work` stays in the
+  # foreground and dispatches whatever routes/console.php has due each minute — for this
+  # app that is `dates:notify` every fifteen minutes.
+  scheduler:
+    <<: *php
+    command: php artisan schedule:work
+
+  # The notification sends themselves. `dates:notify` only queues a job per user, so one
+  # unreachable FCM call cannot stall everyone behind it — and the scheduler tick stays
+  # short whatever FCM is doing. QUEUE_CONNECTION=database, so this needs no broker.
+  queue:
+    <<: *php
+    command: php artisan queue:work --tries=3 --max-time=3600
+
+  postgres:
+    image: postgres:18.3-bookworm
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-dates}
+      POSTGRES_USER: ${DB_USERNAME:-dates}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}
+    volumes:
+      - ${SHARED_PATH:-.}/docker/volumes/postgres_data:/var/lib/postgresql
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-dates}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  node:
+    image: dates-node
+    build:
+      context: ./docker/node
+      args:
+        USER_ID: ${USER_ID:-1000}
+        GROUP_ID: ${GROUP_ID:-1000}
+    ports:
+      - "${QUASAR_PORT:-9201}:9200"      # quasar dev -m pwa (9200 is Quasar's pwa-mode default)
+    volumes:
+      - ./front:/var/www/html
+      - ./docker/volumes/node_home:/home/app
+    restart: unless-stopped
+
+  # The Capacitor build — the WebView app that ships to Play (plan phase 4). Behind a
+  # profile because it is a one-shot builder, not a service: `docker compose up` must not
+  # start it, and `deploy.php`'s explicit `compose_services` list keeps it off the server.
+  #
+  #   docker compose --profile capacitor run --rm capacitor ./gradlew assembleDebug
+  #
+  # `~/.gradle` and `~/.npm` are named volumes rather than bind mounts: they hold a few
+  # hundred MB of downloaded Gradle distributions and packages that belong to the container,
+  # not the repo, and keeping them means the second build is not another cold start.
+  #
+  # `~/.android` is the opposite case and is a bind mount for it: Gradle generates
+  # `debug.keystore` there on the first debug build, and with `--rm` and no mount that key —
+  # and therefore the APK's SHA-256 fingerprint — would be a different one on every build.
+  # The fingerprint is published in `/.well-known/assetlinks.json`, so it has to be stable
+  # across builds. Under docker/volumes/ like the other bind mounts, gitignored, and
+  # pre-created with a .gitkeep because a bind mount whose source is missing is created by
+  # the daemon as root.
+  capacitor:
+    profiles: ["capacitor"]
+    image: dates-capacitor
+    build:
+      context: ./docker/capacitor
+      args:
+        USER_ID: ${USER_ID:-1000}
+        GROUP_ID: ${GROUP_ID:-1000}
+    volumes:
+      - ./front/src-capacitor:/work
+      - ./docker/volumes/android_home:/home/app/.android
+      - capacitor_gradle:/home/app/.gradle
+      - capacitor_npm:/home/app/.npm
+
+# Only the Android build caches. Everything else in this project is a bind mount under
+# docker/volumes/ so it can be inspected and backed up with the repo; Gradle's caches and
+# npm's are large, disposable and of no interest outside the container.
+volumes:
+  capacitor_gradle:
+  capacitor_npm:

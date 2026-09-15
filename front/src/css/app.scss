@@ -1,0 +1,25 @@
+// app global css
+
+// A date title is free text, so one unbroken token — a pasted URL, a 200-character name — would
+// otherwise give the whole document a horizontal scrollbar.
+//
+// `anywhere` rather than `break-word`, and that is the whole reason this works. The two wrap
+// identically; they differ in what they tell the layout the text's *minimum* width is.
+// `break-word` reports the unbroken word, so a flex item sized by `min-width: auto` — which is
+// every `q-item-section` holding a label — still refuses to shrink below it and overflows
+// anyway. `anywhere` reports the narrowest break, so the item shrinks and the text wraps.
+//
+// On `body` because `overflow-wrap` inherits, so this is one statement rather than one per
+// component. The `ellipsis` helper is unaffected — it sets `white-space: nowrap`, which decides
+// wrapping before this can.
+body {
+  overflow-wrap: anywhere;
+}
+
+// A button is the exception, because a label is a control and not prose: "Delete" broken across
+// two lines as "Dele/te" is not a smaller button, it is a worse one. `.q-btn` does not protect
+// itself: Quasar computes `white-space: normal` on it, so without this a button inherits the
+// rule above like any other text.
+.q-btn {
+  overflow-wrap: normal;
+}

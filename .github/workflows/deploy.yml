@@ -1,0 +1,217 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two deploys at once would fight over the release directory and the containers.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+
+    env:
+      COMPOSE_PROJECT_NAME: dates
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # --- toolchain images ----------------------------------------------
+
+      - uses: docker/setup-buildx-action@v4
+
+      # A fresh runner has no docker images. The php and node services declare
+      # both `image:` and `build:`, and compose builds only when an image with
+      # that name is missing. So these steps build ahead of time and `load` the
+      # result into the runner's image store under exactly the name compose
+      # looks for (`image: dates-php` implies :latest) — compose then
+      # finds it and skips building.
+      #
+      # The point of doing it here rather than letting compose build: compose
+      # cannot read the Actions cache. type=gha persists the BuildKit layers
+      # between runs, which matters because the php image's apt-get +
+      # docker-php-ext-install layer compiles gd, intl and the rest from
+      # source — measured at 131 s cold, seconds when cached.
+      - name: Build the php image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./docker/php
+          tags: dates-php:latest
+          load: true
+          cache-from: type=gha,scope=php
+          cache-to: type=gha,mode=max,scope=php
+
+      - name: Build the node image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./docker/node
+          tags: dates-node:latest
+          load: true
+          cache-from: type=gha,scope=node
+          cache-to: type=gha,mode=max,scope=node
+
+      # --- backend -------------------------------------------------------
+
+      - name: Install PHP dependencies
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e COMPOSER_HOME=/tmp/.composer \
+            php composer install --no-dev --prefer-dist --no-interaction \
+              --no-progress --optimize-autoloader
+
+      # --- frontend ------------------------------------------------------
+
+      # VITE_* values are baked into the bundle at build time, so they have to
+      # exist before `npm run build`. Written as a file rather than passed as
+      # env vars because Quasar resolves its own .env chain
+      # (.env -> .env.local -> .env.prod -> .env.local.prod) and only `.env`
+      # is guaranteed to be present on a clean CI checkout.
+      #
+      # VITE_API_URL is intentionally empty: the API is same-origin in
+      # production (host nginx routes /api to Laravel), so src/api.js requests
+      # a relative /api/... path.
+      - name: Write frontend env
+        working-directory: front
+        run: |
+          cat > .env <<'EOF'
+          VITE_API_URL=
+          EOF
+
+      # Same node container as local dev, so the exact node version comes from
+      # docker/node/Dockerfile (24.15.0) rather than a floating runner label.
+      # NPM_CONFIG_PREFIX is overridden because the image points it at
+      # /home/app, which the runner's uid cannot write to.
+      - name: Install JS dependencies and build the PWA
+        run: |
+          docker compose run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e NPM_CONFIG_PREFIX=/tmp/.npm-global \
+            -e npm_config_cache=/tmp/.npm-cache \
+            node sh -c 'npm ci && npm run build'
+
+      - name: Fail if the service worker is missing
+        run: test -f front/dist/pwa/sw.js && test -f front/dist/pwa/manifest.json
+
+      # --- artifact ------------------------------------------------------
+
+      - name: Assemble release artifact
+        run: |
+          # 1. Export the tracked files into a staging dir. `git archive` writes
+          #    a tar stream to stdout, so it is piped straight into tar -x; no
+          #    intermediate archive file exists. Paths marked export-ignore in
+          #    .gitattributes are left out; anything else new ships automatically.
+          #    tar does not create the -C directory, hence the mkdir.
+          mkdir -p build/release
+          git archive HEAD | tar -x -C build/release
+
+          # 2. Add the build outputs, which are not in git.
+          cp -r back/vendor build/release/back/vendor
+
+          #    /front is export-ignored, so the archive left no front/ directory
+          #    behind and cp needs the parent created first.
+          mkdir -p build/release/front/dist
+          cp -r front/dist/pwa build/release/front/dist/pwa
+
+          # 3. A config or route cache produced on the runner would have CI
+          # absolute paths baked into it; the deploy regenerates them on the VPS.
+          rm -f build/release/back/bootstrap/cache/*.php
+
+          # 4. Pack the staging dir. -C means the tarball has no build/release/
+          #    prefix, so it unpacks straight into the release directory.
+          tar -czf build/release.tar.gz -C build/release .
+          ls -lh build/release.tar.gz
+
+      # --- deploy --------------------------------------------------------
+
+      # Runs on the runner, not the server: Deployer drives the VPS over SSH.
+      # Uses the PHP and Composer preinstalled in the ubuntu-24.04 runner image.
+      # Pinned exactly so a Deployer release cannot change deploy behaviour
+      # without a commit here.
+      - name: Install Deployer
+        run: |
+          composer global require deployer/deployer:7.5.12 --no-interaction --no-progress
+
+          # composer prints a "Changed current directory to …" notice, so take
+          # the last line only.
+          BIN="$(composer global config bin-dir --absolute 2>/dev/null | tail -n1)"
+
+          # Called by absolute path: $GITHUB_PATH only affects later steps, so
+          # `dep` is not yet resolvable from PATH inside this one.
+          "$BIN/dep" --version
+
+          echo "$BIN" >> "$GITHUB_PATH"
+
+      - name: Set up SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy
+        run: dep deploy production
+
+      # --- notification --------------------------------------------------
+
+      # Dynamic values arrive as env vars rather than inline ${{ }} expressions:
+      # an expression is pasted into the script body before the shell sees it, so
+      # anything attacker-controlled reaching one would be executed.
+      #
+      # No parse_mode, so the subject needs no escaping and cannot break the
+      # markup; Telegram auto-links the bare run URL anyway.
+      - name: Notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_STATUS: ${{ job.status }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set — skipping the notification."
+            exit 0
+          fi
+
+          case "$JOB_STATUS" in
+            success)   HEADLINE="✅ $COMPOSE_PROJECT_NAME deployed" ;;
+            cancelled) HEADLINE="⚪ $COMPOSE_PROJECT_NAME deploy cancelled" ;;
+            *)         HEADLINE="❌ $COMPOSE_PROJECT_NAME deploy failed" ;;
+          esac
+
+          # github.event.head_commit is absent on workflow_dispatch, so the
+          # subject comes from the checked-out tree. Guarded because a failure
+          # in checkout itself leaves no repository to read.
+          SUBJECT="$(git log -1 --pretty=%s 2>/dev/null)" || SUBJECT=""
+          COMMIT_LINE="${COMMIT_SHA:0:7}${SUBJECT:+ $SUBJECT}"
+
+          TEXT="$(printf '%s\n%s\n%s' "$HEADLINE" "$COMMIT_LINE" "$RUN_URL")"
+
+          BODY="$(jq -n \
+            --arg chat_id "$TELEGRAM_CHAT_ID" \
+            --arg text "$TEXT" \
+            '{chat_id: $chat_id, text: $text}')"
+
+          if ! RESPONSE="$(curl -sS -m 30 \
+                -H 'Content-Type: application/json' \
+                -d "$BODY" \
+                "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage")"; then
+            echo "Telegram request failed; leaving the job status untouched."
+            exit 0
+          fi
+
+          printf '%s' "$RESPONSE" | jq -e '.ok' >/dev/null \
+            || echo "Telegram rejected the message: $RESPONSE"
